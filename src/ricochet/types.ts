@@ -1,44 +1,40 @@
-export interface RicochetSale {
-  id: string;
-  date: string;           // ISO date string
-  transactionNumber: string;
-  items: RicochetSaleItem[];
-  subtotal: number;
-  taxAmount: number;
-  total: number;
-  paymentMethod: string;
+/** Raw row from Ricochet Payout History CSV export */
+export interface RicochetPayoutRow {
+  item: string;
+  saleNumber: string;
+  agreedPrice: number;
+  costSplitPct: number;   // e.g. 90 = 90%
+  agedPrice: number;
+  discounts: number;
+  paidDate: string;       // YYYY-MM-DD
+  soldDate: string;       // YYYY-MM-DD
+  amount: number;         // amount paid to consigner
 }
 
-export interface RicochetSaleItem {
-  itemId: string;
-  description: string;
-  consignerId: string;
-  consignerName: string;
-  salePrice: number;
-  consignerPayout: number;
-  storeFee: number;
-  category: string;
+/** A single payout history record after parsing */
+export interface RicochetPayoutRecord {
+  item: string;
+  saleNumber: string;
+  agreedPrice: number;
+  splitPct: number;
+  agedPrice: number;
+  discounts: number;
+  paidDate: string;
+  soldDate: string;
+  consignerAmount: number;
+  // Derived
+  grossSalePrice: number; // agreedPrice after discounts
+  storeCommission: number; // grossSalePrice - consignerAmount
 }
 
-export interface RicochetConsignerPayout {
-  id: string;
-  date: string;
-  consignerId: string;
-  consignerName: string;
-  amount: number;
-  checkNumber?: string;
-  items: RicochetSaleItem[];
-}
-
-export interface RicochetInventoryItem {
-  itemId: string;
-  description: string;
-  consignerId: string;
-  consignerName: string;
-  listPrice: number;
-  dateAdded: string;
-  category: string;
-  status: 'active' | 'sold' | 'returned' | 'expired';
+/** Daily totals aggregated from payout records */
+export interface DailyTotals {
+  date: string;           // YYYY-MM-DD (using soldDate)
+  recordCount: number;
+  grossSales: number;     // sum of agreedPrice (after discounts)
+  consignerPayouts: number; // sum of consigner amounts (90%)
+  storeCommission: number;  // sum of store share (10%)
+  totalDiscounts: number;
 }
 
 export interface RicochetDateRange {

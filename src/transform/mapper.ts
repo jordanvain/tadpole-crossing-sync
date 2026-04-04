@@ -1,67 +1,34 @@
-import { config } from '../utils/config';
-import type { RicochetSale, RicochetConsignerPayout } from '../ricochet/types';
-import type { WaveTransaction } from '../wave/types';
+import type { DailyTotals } from '../ricochet/types';
+import type { WaveEntrySet } from '../wave/types';
 
-// TODO: populate these account IDs from Wave once accounts are set up
-const WAVE_ACCOUNTS = {
-  checking: '',          // primary checking account
-  salesIncome: '',       // sales/revenue account
-  commissionIncome: '',  // store commission/fee income
-  salesTaxPayable: '',   // sales tax liability
-  consignerExpense: '',  // consigner payout expense account
-};
-
-export function saleToWaveTransaction(sale: RicochetSale): WaveTransaction {
-  const storeIncome = sale.items.reduce((sum, item) => sum + item.storeFee, 0);
-
+/**
+ * Map a DailyTotals row into the two Wave transactions we need to create:
+ *   1. INCOME  — gross sales total  → Sales Income account
+ *   2. EXPENSE — consigner payout   → Cost of Goods / Consigner Payouts account
+ */
+export function dailyTotalsToWaveEntries(day: DailyTotals): WaveEntrySet {
+  const id = `ricochet-${day.date}`;
   return {
-    businessId: config.wave.businessId,
-    externalId: `ricochet-sale-${sale.transactionNumber}`,
-    date: sale.date,
-    description: `Ricochet sale #${sale.transactionNumber}`,
-    anchor: {
-      accountId: WAVE_ACCOUNTS.checking,
-      amount: sale.total,
-      direction: 'DEPOSIT',
+    externalId: id,
+    date: day.date,
+    income: {
+      externalId: `${id}-income`,
+      date: day.date,
+      description: `Consignment sales — ${day.date} (${day.recordCount} items)`,
+      amount: day.grossSales,
+      type: 'income',
+      accountName: 'Sales',
+      categoryName: 'Sales',
     },
-    lineItems: [
-      {
-        accountId: WAVE_ACCOUNTS.salesIncome,
-        amount: sale.subtotal - storeIncome,
-        description: 'Consigner sales (pass-through)',
-      },
-      {
-        accountId: WAVE_ACCOUNTS.commissionIncome,
-        amount: storeIncome,
-        description: 'Store commission/fees',
-      },
-      ...(sale.taxAmount > 0 ? [{
-        accountId: WAVE_ACCOUNTS.salesTaxPayable,
-        amount: sale.taxAmount,
-        description: 'Sales tax collected',
-      }] : []),
-    ],
-  };
-}
-
-export function payoutToWaveTransaction(payout: RicochetConsignerPayout): WaveTransaction {
-  return {
-    businessId: config.wave.businessId,
-    externalId: `ricochet-payout-${payout.id}`,
-    date: payout.date,
-    description: `Consigner payout — ${payout.consignerName}`,
-    anchor: {
-      accountId: WAVE_ACCOUNTS.checking,
-      amount: payout.amount,
-      direction: 'WITHDRAWAL',
+    expense: {
+      externalId: `${id}-expense`,
+      date: day.date,
+      description: `Consigner payout — ${day.date} (${day.recordCount} items, 90%)`,
+      amount: day.consignerPayouts,
+      type: 'expense',
+      accountName: 'Checking',
+      categoryName: 'Cost of Goods Sold',
     },
-    lineItems: [
-      {
-        accountId: WAVE_ACCOUNTS.consignerExpense,
-        amount: payout.amount,
-        description: `Payout to ${payout.consignerName}`,
-      },
-    ],
   };
 }
 
