@@ -1,41 +1,26 @@
-export interface WaveTransaction {
-  id?: string;
-  businessId: string;
-  externalId: string;    // used for deduplication
-  date: string;          // ISO date string
+/** A single transaction to be entered into Wave via browser automation */
+export interface WaveEntry {
+  externalId: string;   // used for deduplication tracking
+  date: string;         // YYYY-MM-DD
   description: string;
-  anchor: WaveTransactionAnchor;
-  lineItems: WaveLineItem[];
-}
-
-export interface WaveTransactionAnchor {
-  accountId: string;
   amount: number;
-  direction: 'DEPOSIT' | 'WITHDRAWAL';
+  type: 'income' | 'expense';
+  accountName: string;  // Which account (e.g. "Checking", "Sales")
+  categoryName: string; // Category / contra account
 }
 
-export interface WaveLineItem {
-  accountId: string;
-  amount: number;
-  description: string;
-  taxId?: string;
+/** A paired income + expense entry for one day of consignment activity */
+export interface WaveEntrySet {
+  externalId: string;
+  date: string;
+  income: WaveEntry;
+  expense: WaveEntry;
 }
 
-export interface WaveAccount {
-  id: string;
-  name: string;
-  type: string;
-  subtype: string;
-  normalBalanceType: 'DEBIT' | 'CREDIT';
-}
-
-export interface WaveCustomer {
-  id: string;
-  name: string;
-  email?: string;
-}
-
-export interface WaveCreateTransactionResult {
-  transaction: WaveTransaction;
-  didCreate: boolean;
+/** Result from attempting to enter a transaction into Wave */
+export interface WaveEntryResult {
+  entry: WaveEntry;
+  success: boolean;
+  skipped: boolean;
+  error?: string;
 }
