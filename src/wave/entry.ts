@@ -142,31 +142,50 @@ export class WaveEntryClient {
       await page.waitForTimeout(1_200);
       await screenshot(page, 'wave-upload-file-selected');
 
-      // Wave import wizard: click Next / Continue if a column-mapping step appears
+      // The Upload dialog has a Payment account dropdown — select the first available account
+      // (or leave default) before clicking Upload.
+      const paymentAcctSelect = page.locator('select').filter({ hasText: /./ }).first();
+      if (await paymentAcctSelect.isVisible({ timeout: 2_000 }).catch(() => false)) {
+        // Use the first available option (typically "Cash on Hand" on free tier)
+        const opts = await paymentAcctSelect.locator('option').allInnerTexts();
+        const preferred = opts.find(o => /cash on hand|checking|bank/i.test(o));
+        if (preferred) {
+          await paymentAcctSelect.selectOption({ label: preferred });
+          logger.info(`Wave: set payment account to "${preferred}"`);
+        }
+      }
+
+      // Click the Upload button (Wave's upload dialog uses "Upload" as the submit label)
+      const uploadBtn = page
+        .getByRole('button', { name: /^upload$|^import$|^confirm$|^finish$|^submit$/i })
+        .first();
+
+      if (await uploadBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
+        await uploadBtn.click();
+        await page.waitForTimeout(3_000); // Wave processes the upload
+        await screenshot(page, 'wave-upload-confirmed');
+
+        // Wave may show a success message or redirect to transactions
+        const successVisible = await page
+          .locator('text=/success|imported|complete/i, [role="alert"]')
+          .isVisible({ timeout: 5_000 })
+          .catch(() => false);
+        logger.info(`Wave: upload submitted${successVisible ? ' — success indicator visible' : ''}`);
+        return true;
+      }
+
+      // Wave import wizard multi-step: click Next / Continue
       for (let step = 0; step < 3; step++) {
-        const nextBtn = page
-          .getByRole('button', { name: /next|continue|proceed/i })
-          .first();
+        const nextBtn = page.getByRole('button', { name: /next|continue|proceed/i }).first();
         if (!(await nextBtn.isVisible({ timeout: 2_000 }).catch(() => false))) break;
         await nextBtn.click();
         await page.waitForTimeout(800);
         await screenshot(page, `wave-upload-step-${step + 1}`);
       }
 
-      // Final confirm / import button
-      const confirmBtn = page
-        .getByRole('button', { name: /^import$|^confirm$|^finish$|^submit$/i })
-        .first();
-      if (await confirmBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
-        await confirmBtn.click();
-        await page.waitForTimeout(2_000);
-        await screenshot(page, 'wave-upload-confirmed');
-        return true;
-      }
-
-      logger.warn('Wave: CSV upload accepted but no final confirm button — assuming auto-submit');
+      logger.warn('Wave: no Upload/Import button found after file select');
       await screenshot(page, 'wave-upload-no-confirm');
-      return true;
+      return false;
     } catch (err) {
       logger.warn(`Wave CSV import attempt failed: ${err}`);
       await screenshot(page, 'wave-upload-error').catch(() => {});
