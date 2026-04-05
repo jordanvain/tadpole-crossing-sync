@@ -162,29 +162,43 @@ export class WaveEntryClient {
 
       if (await uploadBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
         await uploadBtn.click();
-        await page.waitForTimeout(3_000); // Wave processes the upload
-        await screenshot(page, 'wave-upload-confirmed');
+        await page.waitForTimeout(2_000);
+        await screenshot(page, 'wave-upload-submitted');
 
-        // Wave may show a success message or redirect to transactions
-        const successVisible = await page
-          .locator('text=/success|imported|complete/i, [role="alert"]')
-          .isVisible({ timeout: 5_000 })
-          .catch(() => false);
-        logger.info(`Wave: upload submitted${successVisible ? ' — success indicator visible' : ''}`);
+        // Wave opens a multi-step CSV Import wizard with buttons like:
+        //   "Confirm date" → "Confirm amounts" → "Confirm description" → "Confirm import"
+        // Click through each step until the wizard closes or we hit "Confirm import".
+        for (let step = 0; step < 6; step++) {
+          // Look for any "Confirm ..." button or final "Confirm import" button
+          const confirmBtn = page
+            .getByRole('button', { name: /confirm/i })
+            .first();
+
+          if (!(await confirmBtn.isVisible({ timeout: 3_000 }).catch(() => false))) {
+            logger.info(`Wave: wizard completed after ${step} confirm step(s)`);
+            break;
+          }
+
+          const btnLabel = await confirmBtn.innerText().catch(() => 'confirm');
+          logger.info(`Wave: clicking wizard step button: "${btnLabel}"`);
+          await confirmBtn.click();
+          await page.waitForTimeout(1_500);
+          await screenshot(page, `wave-wizard-step-${step + 1}`);
+
+          // If this was "Confirm import", we're done
+          if (/confirm import/i.test(btnLabel)) {
+            logger.info('Wave: CSV Import wizard completed — import confirmed');
+            await page.waitForTimeout(2_000); // let Wave process
+            break;
+          }
+        }
+
+        await screenshot(page, 'wave-upload-done');
         return true;
       }
 
-      // Wave import wizard multi-step: click Next / Continue
-      for (let step = 0; step < 3; step++) {
-        const nextBtn = page.getByRole('button', { name: /next|continue|proceed/i }).first();
-        if (!(await nextBtn.isVisible({ timeout: 2_000 }).catch(() => false))) break;
-        await nextBtn.click();
-        await page.waitForTimeout(800);
-        await screenshot(page, `wave-upload-step-${step + 1}`);
-      }
-
-      logger.warn('Wave: no Upload/Import button found after file select');
-      await screenshot(page, 'wave-upload-no-confirm');
+      logger.warn('Wave: no Upload button found after file select');
+      await screenshot(page, 'wave-upload-no-btn');
       return false;
     } catch (err) {
       logger.warn(`Wave CSV import attempt failed: ${err}`);
