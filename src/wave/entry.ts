@@ -18,6 +18,22 @@ export class WaveEntryClient {
       return results;
     }
 
+    // In dry run mode, report what would be created without launching a browser
+    if (dryRun) {
+      for (const set of entrySets) {
+        for (const entry of [set.income, set.expense]) {
+          if (alreadySynced.has(entry.externalId)) {
+            logger.info(`Skipping already-synced entry: ${entry.externalId}`);
+            results.push({ entry, success: true, skipped: true });
+          } else {
+            logger.info(`[DRY RUN] Would create ${entry.type} entry: ${entry.description} — $${entry.amount}`);
+            results.push({ entry, success: true, skipped: false });
+          }
+        }
+      }
+      return results;
+    }
+
     const browser = await chromium.launch({
       headless: config.browser.headless,
       slowMo: config.browser.slowMo,
@@ -38,12 +54,6 @@ export class WaveEntryClient {
             continue;
           }
 
-          if (dryRun) {
-            logger.info(`[DRY RUN] Would create ${entry.type} entry: ${entry.description} — $${entry.amount}`);
-            results.push({ entry, success: true, skipped: false });
-            continue;
-          }
-
           const result = await this.enterTransaction(page, entry);
           results.push(result);
 
@@ -61,12 +71,13 @@ export class WaveEntryClient {
   private async navigateToTransactions(page: import('playwright').Page): Promise<void> {
     logger.info('Navigating to Wave Accounting → Transactions...');
 
-    // Navigate directly to transactions page
     const businessId = config.wave.businessId;
-    await page.goto(
-      `${config.wave.url}/${businessId}/accounting/transactions`,
-      { waitUntil: 'networkidle' },
-    );
+    const targetUrl = `${config.wave.url}/${businessId}/accounting/transactions`;
+
+    // If loginToWave already landed us here (it navigates to this URL), skip the goto
+    if (!page.url().includes('/accounting/transactions')) {
+      await page.goto(targetUrl, { waitUntil: 'load' });
+    }
     await screenshot(page, 'wave-transactions-page');
   }
 
@@ -132,7 +143,7 @@ export class WaveEntryClient {
         .getByRole('button', { name: /save/i })
         .or(page.locator('button').filter({ hasText: /^save$/i }));
       await saveBtn.first().click();
-      await page.waitForLoadState('networkidle');
+      await page.waitForLoadState('load');
       await screenshot(page, `wave-txn-saved-${entry.externalId}`);
 
       logger.info(`Wave transaction created: ${entry.description}`);

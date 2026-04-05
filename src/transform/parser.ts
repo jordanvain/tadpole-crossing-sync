@@ -18,13 +18,20 @@ function parseAmount(raw: string): number {
 
 function parseDate(raw: string): string {
   if (!raw || raw.trim() === '') return '';
-  // Ricochet may use MM/DD/YYYY or YYYY-MM-DD
   const trimmed = raw.trim();
+  // Already ISO: YYYY-MM-DD
   if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
-  const parts = trimmed.split('/');
-  if (parts.length === 3) {
-    const [m, d, y] = parts;
+  // Slash-separated: MM/DD/YYYY or MM/DD/YY
+  const slashParts = trimmed.split('/');
+  if (slashParts.length === 3) {
+    const [m, d, y] = slashParts;
     return `${y.padStart(4, '20')}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
+  }
+  // Dash-separated: MM-DD-YYYY (Ricochet actual format)
+  const dashParts = trimmed.split('-');
+  if (dashParts.length === 3 && dashParts[2].length === 4) {
+    const [m, d, y] = dashParts;
+    return `${y}-${m.padStart(2, '0')}-${d.padStart(2, '0')}`;
   }
   return trimmed;
 }
