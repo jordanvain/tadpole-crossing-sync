@@ -1,11 +1,15 @@
 import path from 'path';
+import fs from 'fs';
 import { chromium } from 'playwright';
 import { config } from '../utils/config';
 import { logger } from '../utils/logger';
 import { screenshot } from '../utils/screenshots';
-import { loginToWave, navigateToTransactions } from './login';
+import { loginToWave, navigateToTransactions, BUSINESS_TRANSACTIONS_URL } from './login';
 import { writeWaveCsv } from './csv-writer';
 import type { WaveEntry, WaveEntryResult, WaveEntrySet } from './types';
+
+// Persist Wave session to avoid repeated logins (which trigger Wave's device-verification)
+const SESSION_DIR = path.join(config.paths.data, 'wave-session');
 
 export class WaveEntryClient {
   async enterEntrySets(
@@ -20,7 +24,7 @@ export class WaveEntryClient {
       return results;
     }
 
-    // Flatten to a list, skipping already-synced entries
+    // Flatten, skipping already-synced
     const toCreate: WaveEntry[] = [];
     for (const set of entrySets) {
       for (const entry of [set.income, set.expense]) {
@@ -41,138 +45,136 @@ export class WaveEntryClient {
       return results;
     }
 
-    const browser = await chromium.launch({
+    // Use a persistent context so Wave session cookies survive between runs.
+    // This avoids the /auth/verify device-verification flow that Wave triggers
+    // when it detects repeated logins from a new browser fingerprint.
+    fs.mkdirSync(SESSION_DIR, { recursive: true });
+
+    const context = await chromium.launchPersistentContext(SESSION_DIR, {
       headless: config.browser.headless,
       slowMo: config.browser.slowMo,
     });
-    const context = await browser.newContext();
     const page = await context.newPage();
 
     try {
       await loginToWave(page);
+
+      // Detect Wave's device-verification interstitial (/auth/verify)
+      if (page.url().includes('/auth/verify')) {
+        logger.warn(
+          'Wave is asking for device verification — check Sharon@tadpolecrossinggifts.com email ' +
+          'and click the verification link, then re-run the sync.',
+        );
+        await screenshot(page, 'wave-auth-verify-blocked');
+        throw new Error(
+          'Wave device verification required. Open the verification email, click the link, ' +
+          'then run the sync again (the saved session will skip login next time).',
+        );
+      }
+
       await navigateToTransactions(page);
 
-      // ── Strategy 1: CSV import via "More" dropdown ─────────────────────────
+      // ── Strategy 1: CSV import via "More" → "Upload transactions" ────────────
       const csvImported = await this.tryCsvImport(page, toCreate);
-
       if (csvImported) {
         logger.info('Wave CSV import succeeded');
-        for (const entry of toCreate) {
-          results.push({ entry, success: true, skipped: false });
-        }
+        for (const entry of toCreate) results.push({ entry, success: true, skipped: false });
         return results;
       }
 
-      // ── Strategy 2: Manual form entry ─────────────────────────────────────
-      logger.info('CSV import unavailable — falling back to manual form entry');
+      // ── Strategy 2: Manual form entry ─────────────────────────────────────────
+      logger.info('CSV import unavailable — using manual form entry');
       for (const entry of toCreate) {
         const result = await this.enterTransactionForm(page, entry);
         results.push(result);
         await page.waitForTimeout(400);
       }
     } finally {
-      await browser.close();
+      await context.close();
     }
 
     return results;
   }
 
-  // ── CSV import ─────────────────────────────────────────────────────────────
+  // ── CSV import ──────────────────────────────────────────────────────────────
 
   private async tryCsvImport(
     page: import('playwright').Page,
     entries: WaveEntry[],
   ): Promise<boolean> {
     try {
-      logger.info('Wave: looking for "More" → Import option...');
+      logger.info('Wave: looking for "More" → "Upload transactions"...');
 
-      // Wave transactions page has a "More" button (sometimes a dropdown trigger)
-      const moreBtn = page
-        .getByRole('button', { name: /^more$/i })
-        .or(page.locator('button').filter({ hasText: /^more$/i }))
-        .or(page.locator('[aria-label*="more" i]'))
-        .first();
-
-      const moreVisible = await moreBtn.isVisible({ timeout: 5_000 }).catch(() => false);
-      if (!moreVisible) {
-        logger.info('Wave: "More" button not found, skipping CSV import path');
+      // "More" is a plain button (confirmed via probe)
+      const moreBtn = page.locator('button').filter({ hasText: /^More$/ }).first();
+      if (!(await moreBtn.isVisible({ timeout: 5_000 }).catch(() => false))) {
+        logger.info('Wave: "More" button not visible, skipping CSV import');
         return false;
       }
 
       await moreBtn.click();
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(400);
       await screenshot(page, 'wave-more-dropdown');
 
-      // Look for an Import / Upload option in the dropdown
-      const importItem = page
-        .getByRole('menuitem', { name: /import|upload/i })
-        .or(page.locator('[role="menuitem"], [role="option"], li, a').filter({ hasText: /import|upload/i }))
+      // "Upload transactions" is the free-tier import option
+      const uploadItem = page
+        .locator('[role="menuitem"], [role="option"], li, a, button')
+        .filter({ hasText: /upload transactions/i })
         .first();
 
-      const importVisible = await importItem.isVisible({ timeout: 3_000 }).catch(() => false);
-      if (!importVisible) {
-        logger.info('Wave: no Import item in "More" dropdown');
-        // Close dropdown
+      if (!(await uploadItem.isVisible({ timeout: 3_000 }).catch(() => false))) {
+        logger.info('Wave: "Upload transactions" not in More menu');
         await page.keyboard.press('Escape');
         return false;
       }
 
-      await importItem.click();
-      await page.waitForTimeout(500);
-      await screenshot(page, 'wave-import-dialog');
+      await uploadItem.click();
+      await page.waitForTimeout(800);
+      await screenshot(page, 'wave-upload-dialog');
 
-      // Generate the CSV file
+      // Generate the CSV
       const csvPath = writeWaveCsv(entries);
       logger.info(`Wave: generated import CSV at ${csvPath}`);
 
-      // Look for file input (visible or hidden) and upload
+      // Upload the file (Playwright can set files on hidden inputs too)
       const fileInput = page.locator('input[type="file"]').first();
-
-      // Playwright can set files on hidden inputs directly
       await fileInput.setInputFiles(csvPath);
-      await page.waitForTimeout(1_000);
-      await screenshot(page, 'wave-import-file-selected');
+      await page.waitForTimeout(1_200);
+      await screenshot(page, 'wave-upload-file-selected');
 
-      // Handle column-mapping step if present: look for a "Next" or "Continue" button
-      const nextBtn = page
-        .getByRole('button', { name: /next|continue|proceed/i })
-        .first();
-      if (await nextBtn.isVisible({ timeout: 3_000 }).catch(() => false)) {
-        logger.info('Wave: column mapping step detected — clicking Next');
+      // Wave import wizard: click Next / Continue if a column-mapping step appears
+      for (let step = 0; step < 3; step++) {
+        const nextBtn = page
+          .getByRole('button', { name: /next|continue|proceed/i })
+          .first();
+        if (!(await nextBtn.isVisible({ timeout: 2_000 }).catch(() => false))) break;
         await nextBtn.click();
         await page.waitForTimeout(800);
-        await screenshot(page, 'wave-import-column-map');
-
-        // Try another Next if there's a second mapping step
-        if (await nextBtn.isVisible({ timeout: 2_000 }).catch(() => false)) {
-          await nextBtn.click();
-          await page.waitForTimeout(500);
-        }
+        await screenshot(page, `wave-upload-step-${step + 1}`);
       }
 
-      // Final "Import" / "Confirm" / "Submit" button
+      // Final confirm / import button
       const confirmBtn = page
-        .getByRole('button', { name: /import|confirm|submit|finish/i })
+        .getByRole('button', { name: /^import$|^confirm$|^finish$|^submit$/i })
         .first();
       if (await confirmBtn.isVisible({ timeout: 5_000 }).catch(() => false)) {
         await confirmBtn.click();
         await page.waitForTimeout(2_000);
-        await screenshot(page, 'wave-import-confirmed');
+        await screenshot(page, 'wave-upload-confirmed');
         return true;
       }
 
-      logger.warn('Wave: import dialog found but no confirm button — import may have auto-submitted');
-      await screenshot(page, 'wave-import-no-confirm');
-      return true; // assume success if file was accepted
-
+      logger.warn('Wave: CSV upload accepted but no final confirm button — assuming auto-submit');
+      await screenshot(page, 'wave-upload-no-confirm');
+      return true;
     } catch (err) {
       logger.warn(`Wave CSV import attempt failed: ${err}`);
-      await screenshot(page, 'wave-import-error');
+      await screenshot(page, 'wave-upload-error').catch(() => {});
       return false;
     }
   }
 
-  // ── Manual form entry ──────────────────────────────────────────────────────
+  // ── Manual form entry ───────────────────────────────────────────────────────
 
   private async enterTransactionForm(
     page: import('playwright').Page,
@@ -181,65 +183,69 @@ export class WaveEntryClient {
     logger.info(`Entering Wave transaction: ${entry.description} — $${entry.amount}`);
 
     try {
-      // Wave: "Add transaction" is sometimes a split button (the label is on the left,
-      // dropdown arrow on the right). Click the label part.
-      const addBtn = page
-        .getByRole('button', { name: /add transaction/i })
-        .or(page.locator('button').filter({ hasText: /add transaction/i }))
-        .first();
-
+      // "Add transaction" opens a dropdown with Add deposit / Add withdrawal / etc.
+      const addBtn = page.locator('button').filter({ hasText: /add transaction/i }).first();
       await addBtn.waitFor({ state: 'visible', timeout: 10_000 });
       await addBtn.click();
-      await page.waitForTimeout(400);
+      await page.waitForTimeout(500);
+
+      // Pick the right sub-option
+      const subOptionText = entry.type === 'income' ? /add deposit/i : /add withdrawal/i;
+      const subOption = page
+        .getByRole('menuitem', { name: subOptionText })
+        .or(page.locator('[role="option"], li, a, button').filter({ hasText: subOptionText }))
+        .first();
+      await subOption.waitFor({ state: 'visible', timeout: 5_000 });
+      await subOption.click();
+      await page.waitForTimeout(700);
       await screenshot(page, `wave-form-open-${entry.externalId}`);
 
-      // Date
-      const dateField = page
-        .locator('input[type="date"]')
-        .or(page.locator('input[placeholder*="date" i]'))
-        .first();
+      // All form fields are inside [role="dialog"]
+      const dialog = page.locator('[role="dialog"]').first();
+      await dialog.waitFor({ state: 'visible', timeout: 8_000 });
+
+      // Date (placeholder="yyyy-mm-dd" scoped to dialog, avoids filter date fields on the page)
+      const dateField = dialog.locator('input[placeholder="yyyy-mm-dd"]').first();
       await dateField.waitFor({ state: 'visible', timeout: 5_000 });
       await dateField.fill(entry.date);
 
       // Description
-      const descField = page
-        .locator('input[placeholder*="description" i], input[placeholder*="memo" i], input[name*="description" i], textarea[placeholder*="description" i]')
-        .first();
+      const descField = dialog.locator('input[placeholder*="Description" i]').first();
       await descField.fill(entry.description);
 
-      // Account dropdown
-      await this.fillCombobox(page, entry.accountName, /account/i);
-
-      // Category dropdown
-      await this.fillCombobox(page, entry.categoryName, /categor/i);
-
-      // Amount
-      const amountField = page
-        .locator('input[type="number"], input[placeholder*="amount" i], input[name*="amount" i]')
-        .first();
+      // Amount (aria-label="amount" is specific to the form field)
+      const amountField = dialog.locator('input[aria-label="amount"]').first();
       await amountField.fill(entry.amount.toFixed(2));
+
+      // Account dropdown (best-effort — don't fail if not found)
+      await this.trySetDropdown(page, dialog, entry.accountName, /account|cash on hand/i);
+
+      // Category dropdown (best-effort)
+      await this.trySetDropdown(page, dialog, entry.categoryName, /categor|uncategorized/i);
 
       await screenshot(page, `wave-form-filled-${entry.externalId}`);
 
       // Save
-      const saveBtn = page
-        .getByRole('button', { name: /^save$|save transaction/i })
-        .or(page.locator('button[type="submit"]').filter({ hasText: /save/i }))
-        .first();
+      const saveBtn = dialog.getByRole('button', { name: /^save$/i }).first();
       await saveBtn.click();
-      await page.waitForTimeout(1_000);
+      await page.waitForTimeout(1_200);
       await screenshot(page, `wave-form-saved-${entry.externalId}`);
 
-      logger.info(`Wave transaction created: ${entry.description}`);
+      logger.info(`Wave transaction saved: ${entry.description}`);
       return { entry, success: true, skipped: false };
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       logger.error(`Failed to enter Wave transaction: ${msg}`);
-      await screenshot(page, `wave-form-error-${entry.externalId}`);
+      await screenshot(page, `wave-form-error-${entry.externalId}`).catch(() => {});
 
-      // Dismiss any open modal before continuing
+      // Dismiss open modal
       try {
-        await page.keyboard.press('Escape');
+        const cancelBtn = page.locator('[role="dialog"] button').filter({ hasText: /cancel/i }).first();
+        if (await cancelBtn.isVisible({ timeout: 800 }).catch(() => false)) {
+          await cancelBtn.click();
+        } else {
+          await page.keyboard.press('Escape');
+        }
         await page.waitForTimeout(300);
       } catch { /* ignore */ }
 
@@ -248,75 +254,46 @@ export class WaveEntryClient {
   }
 
   /**
-   * Fill a combobox/searchable-dropdown.
-   * labelPattern is used to find the right field among multiple comboboxes.
+   * Try to set a Wave custom dropdown (Account or Category) in the form dialog.
+   * These are React components — not native selects. Best-effort: log on failure.
    */
-  private async fillCombobox(
+  private async trySetDropdown(
     page: import('playwright').Page,
-    value: string,
-    labelPattern: RegExp,
+    dialog: import('playwright').Locator,
+    targetValue: string,
+    triggerPattern: RegExp,
   ): Promise<void> {
-    // Try to find a labelled combobox first
-    const labelled = page
-      .locator(`[role="combobox"]`)
-      .filter({ hasText: '' }) // ensure it's interactive
-      .and(
-        page.locator(`[aria-label*="${labelPattern.source.replace(/\\/g, '')}" i]`)
-          .or(page.locator('input').filter({ has: page.locator(`[id*="${labelPattern.source}" i]`) })),
-      )
-      .first();
+    try {
+      // Find a button in the dialog whose text matches the current dropdown label
+      const trigger = dialog
+        .locator('button, [role="combobox"], [role="button"]')
+        .filter({ hasText: triggerPattern })
+        .first();
 
-    // Fall back: find input near a label that matches
-    const nearby = page
-      .locator('label')
-      .filter({ hasText: labelPattern })
-      .locator('xpath=following-sibling::* | ..//*')
-      .locator('input, [role="combobox"]')
-      .first();
+      if (!(await trigger.isVisible({ timeout: 1_500 }).catch(() => false))) return;
 
-    // Try generic combobox near the form (nth-based on order: account=0, category=1)
-    const allComboboxes = page.locator('[role="combobox"], select');
+      await trigger.click();
+      await page.waitForTimeout(400);
 
-    let field = labelled;
-    if (!(await field.isVisible({ timeout: 1_000 }).catch(() => false))) {
-      field = nearby;
-    }
+      // Look for the target value in the dropdown list
+      const option = page
+        .getByRole('option', { name: new RegExp(targetValue, 'i') })
+        .or(page.locator('[role="listbox"] [role="option"], li, button').filter({
+          hasText: new RegExp(targetValue, 'i'),
+        }))
+        .first();
 
-    if (await field.isVisible({ timeout: 1_500 }).catch(() => false)) {
-      // It's a native <select>
-      const tagName = await field.evaluate((el) => (el as { tagName: string }).tagName.toLowerCase());
-      if (tagName === 'select') {
-        await (field as import('playwright').Locator).selectOption({ label: value });
-        return;
+      if (await option.isVisible({ timeout: 2_000 }).catch(() => false)) {
+        await option.click();
+        await page.waitForTimeout(300);
+      } else {
+        logger.debug(`Wave: dropdown option "${targetValue}" not found — using default`);
+        await page.keyboard.press('Escape');
+        await page.waitForTimeout(200);
       }
-      // Searchable input
-      await field.click();
-      await field.fill(value);
-    } else {
-      // Last resort: click each combobox and look for matching option in the listbox
-      const count = await allComboboxes.count();
-      for (let i = 0; i < count; i++) {
-        const cb = allComboboxes.nth(i);
-        const ariaLabel = (await cb.getAttribute('aria-label') ?? '').toLowerCase();
-        const placeholder = (await cb.getAttribute('placeholder') ?? '').toLowerCase();
-        const hint = labelPattern.source.toLowerCase().replace(/\\/g, '');
-        if (!ariaLabel.includes(hint) && !placeholder.includes(hint)) continue;
-        await cb.click();
-        await cb.fill(value).catch(() => { /* read-only combobox */ });
-        break;
-      }
-    }
-
-    // Wait for and click the matching option in the listbox
-    await page.waitForTimeout(300);
-    const option = page
-      .getByRole('option', { name: new RegExp(value, 'i') })
-      .or(page.locator('[role="listbox"] [role="option"]').filter({ hasText: new RegExp(value, 'i') }))
-      .or(page.locator('li').filter({ hasText: new RegExp(value, 'i') }))
-      .first();
-
-    if (await option.isVisible({ timeout: 2_000 }).catch(() => false)) {
-      await option.click();
+    } catch {
+      // Non-fatal: leave default value
+      logger.debug(`Wave: could not set dropdown to "${targetValue}" — skipping`);
     }
   }
 }
