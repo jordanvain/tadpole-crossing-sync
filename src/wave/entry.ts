@@ -169,12 +169,15 @@ export class WaveEntryClient {
         //   "Confirm date" → "Confirm amounts" → "Confirm description" → "Confirm import"
         // Click through each step until the wizard closes or we hit "Confirm import".
         for (let step = 0; step < 6; step++) {
-        // Wave wizard step buttons use patterns like:
-          //   "Confirm date", "Confirm amounts", "Select description", "Confirm import"
-          // Match any primary action button that isn't Cancel/Back/Skip.
+          // Wave wizard step buttons (observed live):
+          //   Step 1: "Confirm date"
+          //   Step 2: "Confirm amounts"
+          //   Step 3: "Select description"
+          //   Step 4: "Upload my statement"  ← final step that triggers the import
           const wizardBtn = page
-            .getByRole('button', { name: /^(confirm|select)\s+(date|amounts?|description|import)$/i })
-            .or(page.getByRole('button', { name: /confirm import/i }))
+            .getByRole('button', {
+              name: /^(confirm (date|amounts?|description)|select description|upload my statement)$/i,
+            })
             .first();
 
           if (!(await wizardBtn.isVisible({ timeout: 3_000 }).catch(() => false))) {
@@ -185,13 +188,13 @@ export class WaveEntryClient {
           const btnLabel = await wizardBtn.innerText().catch(() => '?');
           logger.info(`Wave: clicking wizard step button: "${btnLabel}"`);
           await wizardBtn.click();
-          await page.waitForTimeout(1_500);
+          await page.waitForTimeout(2_000);
           await screenshot(page, `wave-wizard-step-${step + 1}`);
 
-          // If this was "Confirm import", the import is done
-          if (/confirm import/i.test(btnLabel)) {
-            logger.info('Wave: CSV Import wizard completed — import confirmed');
-            await page.waitForTimeout(2_000);
+          // "Upload my statement" is the final button — import is now processing
+          if (/upload my statement/i.test(btnLabel)) {
+            logger.info('Wave: statement uploaded — import complete');
+            await page.waitForTimeout(3_000);
             break;
           }
         }
