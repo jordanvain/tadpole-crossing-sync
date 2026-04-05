@@ -169,26 +169,29 @@ export class WaveEntryClient {
         //   "Confirm date" → "Confirm amounts" → "Confirm description" → "Confirm import"
         // Click through each step until the wizard closes or we hit "Confirm import".
         for (let step = 0; step < 6; step++) {
-          // Look for any "Confirm ..." button or final "Confirm import" button
-          const confirmBtn = page
-            .getByRole('button', { name: /confirm/i })
+        // Wave wizard step buttons use patterns like:
+          //   "Confirm date", "Confirm amounts", "Select description", "Confirm import"
+          // Match any primary action button that isn't Cancel/Back/Skip.
+          const wizardBtn = page
+            .getByRole('button', { name: /^(confirm|select)\s+(date|amounts?|description|import)$/i })
+            .or(page.getByRole('button', { name: /confirm import/i }))
             .first();
 
-          if (!(await confirmBtn.isVisible({ timeout: 3_000 }).catch(() => false))) {
-            logger.info(`Wave: wizard completed after ${step} confirm step(s)`);
+          if (!(await wizardBtn.isVisible({ timeout: 3_000 }).catch(() => false))) {
+            logger.info(`Wave: wizard closed after ${step} step(s)`);
             break;
           }
 
-          const btnLabel = await confirmBtn.innerText().catch(() => 'confirm');
+          const btnLabel = await wizardBtn.innerText().catch(() => '?');
           logger.info(`Wave: clicking wizard step button: "${btnLabel}"`);
-          await confirmBtn.click();
+          await wizardBtn.click();
           await page.waitForTimeout(1_500);
           await screenshot(page, `wave-wizard-step-${step + 1}`);
 
-          // If this was "Confirm import", we're done
+          // If this was "Confirm import", the import is done
           if (/confirm import/i.test(btnLabel)) {
             logger.info('Wave: CSV Import wizard completed — import confirmed');
-            await page.waitForTimeout(2_000); // let Wave process
+            await page.waitForTimeout(2_000);
             break;
           }
         }
